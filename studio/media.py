@@ -22,7 +22,7 @@ _yt_refused_until = 0.0
 YT_BLOCKED = ("YouTube isn't letting PeakCut download videos right now. Upload the video file instead, or use a "
               "Twitch or Kick link. An admin can fix this by adding YouTube cookies under Settings, Connected apps. "
               "YouTube links will be tried again in a few minutes.")
-_BOT_CHECK = re.compile(r"not a bot|confirm you.?re not|sign in to confirm(?! your age)", re.I)
+_BOT_CHECK = re.compile(r"not a bot|confirm you.?re not|sign in to confirm(?! your age)|too many requests|429|http error 429", re.I)
 
 
 class YouTubeBlocked(RuntimeError):

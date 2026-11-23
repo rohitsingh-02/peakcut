@@ -742,7 +742,10 @@ def link_preview(request: Request, url: str = ""):
         raise HTTPException(422, str(e))
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
+        msg = str(e).strip()
+        if "429" in msg or "bot" in msg.lower() or "too many requests" in msg.lower():
+            raise HTTPException(503, media.YT_BLOCKED)
         raise HTTPException(422, "Couldn't open that video. Check the link is public and complete.")
 
 
