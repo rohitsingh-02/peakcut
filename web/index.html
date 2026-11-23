@@ -520,6 +520,19 @@ img.av{object-fit:cover}
 .job-head h3{font-size:15px;font-weight:600;overflow-wrap:anywhere;color:var(--brand-ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .bar{height:6px;background:var(--muted);border-radius:999px;overflow:hidden;margin:6px 0}
 .bar i{display:block;height:100%;background:var(--brand);border-radius:999px;transition:width .8s ease}
+.pipeline-box{background:var(--muted);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;margin:8px 0;display:flex;flex-direction:column;gap:8px}
+.pipe-header{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px}
+.pipe-steps{display:flex;align-items:center;gap:6px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.pipe-step{display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:7px;background:var(--bg);border:1px solid var(--line);font-size:12px;font-weight:500;white-space:nowrap;color:var(--dim)}
+.pipe-step.done{border-color:rgba(15,138,87,0.3);background:var(--good-soft);color:var(--good);font-weight:600}
+.pipe-step.active{border-color:var(--brand);background:var(--brand-soft);color:var(--brand-deep);font-weight:600}
+.pipe-step.waiting{opacity:0.6}
+.pipe-sep{color:var(--faint);font-size:11px;flex:none}
+.pipe-tag{font-size:11px;font-weight:600;padding:2px 7px;border-radius:999px;display:inline-flex;align-items:center;gap:4px}
+.pipe-tag.yt{background:#E8F5E9;color:#2E7D32;border:1px solid #A5D6A7}
+.pipe-tag.audio{background:#E3F2FD;color:#1565C0;border:1px solid #90CAF9}
+.pipe-tag.waiting{background:var(--muted);color:var(--faint);border:1px solid var(--line)}
+.pipe-note{font-size:12px;color:var(--text);line-height:1.4;background:var(--bg);border:1px solid var(--line);padding:6px 10px;border-radius:7px}
 .err{color:var(--bad);font-size:13px;overflow-wrap:anywhere;margin:6px 0}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}
 .clip{background:#fff;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column}
@@ -1772,6 +1785,58 @@ function liveHtml(j) {
     </div>${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}</div>
     ${j.clips.length ? `<div class="grid" style="margin-bottom:28px">${[...j.clips].reverse().map(c => clipHtml(j, c)).join("")}</div>` : ""}`;
 }
+function pipelineHtml(j) {
+  const p = j.progress || 0;
+  const stage = (j.stage || "").toLowerCase();
+  const yt = j.transcript_from === "youtube";
+  const own = j.transcript_from === "own";
+  
+  const s1Done = p > 0.13 || stage.includes("transcript") || stage.includes("moments") || stage.includes("clips") || j.status === "done";
+  const s1Active = !s1Done && (stage.includes("audio") || p <= 0.13);
+  const s1Class = s1Done ? "done" : (s1Active ? "active" : "waiting");
+  
+  const s2Done = stage.includes("moments") || stage.includes("clips") || j.clips.length > 0 || j.status === "done";
+  const s2Active = !s2Done && (stage.includes("transcript") || stage.includes("writing") || stage.includes("reading") || s1Done);
+  const s2Class = s2Done ? "done" : (s2Active ? "active" : "waiting");
+  
+  const s3Done = (stage.includes("clips") && !stage.includes("moments")) || j.clips.length > 0 || j.status === "done";
+  const s3Active = !s3Done && (stage.includes("moments") || stage.includes("finding"));
+  const s3Class = s3Done ? "done" : (s3Active ? "active" : "waiting");
+  
+  const s4Done = j.status === "done";
+  const s4Active = !s4Done && (stage.includes("clips") || stage.includes("finishing") || stage.includes("rendering"));
+  const s4Class = s4Done ? "done" : (s4Active ? "active" : "waiting");
+
+  let transcriptBadge = `<span class="pipe-tag waiting">⏳ Detecting…</span>`;
+  let backendNote = "⏳ <b>Backend:</b> Fetching audio track / checking for instant transcript…";
+  if (yt) {
+    transcriptBadge = `<span class="pipe-tag yt">⚡ YouTube Direct Transcript</span>`;
+    backendNote = "⚡ <b>Backend:</b> Borrowing YouTube Transcript directly — no full audio transcribing needed (Fast mode)";
+  } else if (own) {
+    transcriptBadge = `<span class="pipe-tag audio">🎙️ Local Audio Processing</span>`;
+    backendNote = "🎙️ <b>Backend:</b> Audio downloaded — running local Sherpa-ONNX speech model to transcribe words";
+  }
+
+  return `<div class="pipeline-box">
+    <div class="pipe-header">
+      <span>Backend Pipeline: ${esc(j.stage)}</span>
+      <span>${Math.round(p * 100)}%</span>
+    </div>
+    <div class="pipe-steps">
+      <div class="pipe-step ${s1Class}"><span>1. Audio Source</span></div>
+      <span class="pipe-sep">→</span>
+      <div class="pipe-step ${s2Class}">
+        <span>2. Transcript:</span>
+        ${transcriptBadge}
+      </div>
+      <span class="pipe-sep">→</span>
+      <div class="pipe-step ${s3Class}"><span>3. AI Clip Finder</span></div>
+      <span class="pipe-sep">→</span>
+      <div class="pipe-step ${s4Class}"><span>4. 9:16 Render & Captions</span></div>
+    </div>
+    <div class="pipe-note">${backendNote}</div>
+  </div>`;
+}
 function jobHtml(j) {
   if (j.status === "live") return liveHtml(j);
   const busy = j.status === "queued" || j.status === "running";
@@ -1780,11 +1845,20 @@ function jobHtml(j) {
                 j.took ? "made in " + fmt(j.took) : "", j.kind === "live" ? "recording, " + j.stage.toLowerCase() : ""].filter(Boolean).map(esc).join(" · ");
   const pic = j.thumb ? `<img src="/media/${esc(j.id)}/thumb.jpg" alt="" loading="lazy">` : ic(j.source?.type === "file" ? "film" : "link");
   return `<div class="job-head"><div class="jt"><span class="jthumb">${pic}${j.duration ? `<span class="du">${fmt(j.duration)}</span>` : ""}</span><div style="min-width:0"><h3>${esc(j.title || j.source.name)}</h3><p class="sub">${meta}</p></div></div>
-      <div class="row" style="flex-wrap:nowrap;gap:4px">${busy ? "" : `
+      <div class="row" style="flex-wrap:nowrap;gap:6px">${busy ? `
+        <button class="btn sm danger" data-act="killjob" data-j="${j.id}" title="Kill / Stop Processing" style="display:inline-flex;align-items:center;gap:4px;font-weight:600;">${ic("stop")}Kill</button>
+      ` : `
         ${j.clips.some(c => c.status === "done") ? `<button class="btn sm icon ghost" data-act="dlall" data-j="${j.id}" title="Download all clips of this video" aria-label="Download all clips of this video">${ic("down")}</button>` : ""}
         <button class="btn sm icon ghost" data-act="deljob" data-j="${j.id}" title="Delete" aria-label="Delete this video and its clips">${ic("trash")}</button>
         <label class="selck" title="Select this video and its clips"><input type="checkbox" data-sel="j:${j.id}" ${sel().has("j:" + j.id) ? "checked" : ""} aria-label="Select this video"></label>`}</div></div>
-    ${busy ? `<div class="bar"><i style="width:${Math.round(j.progress * 100)}%"></i></div><p class="sub">${esc(j.stage)} · ${Math.round(j.progress * 100)}%</p>` : ""}
+    ${busy ? `
+      <div class="bar"><i style="width:${Math.round(j.progress * 100)}%"></i></div>
+      ${pipelineHtml(j)}
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;flex-wrap:wrap;">
+        <p class="sub" style="margin:0;font-weight:600;">Status: ${esc(j.stage)} · ${Math.round(j.progress * 100)}%</p>
+        <button class="btn sm danger" data-act="killjob" data-j="${j.id}" title="Kill / Stop Processing" style="padding:2px 8px;font-size:11px;display:inline-flex;align-items:center;gap:4px;">${ic("stop")}Stop</button>
+      </div>` : ""}
+    ${j.status === "stopped" ? `<p class="sub" style="color:var(--text-sub);display:flex;align-items:center;gap:6px;margin-top:4px;"><span style="color:#ef4444;font-weight:700;">⏹ Stopped</span> · ${esc(j.stage || "Stopped by you")}</p>` : ""}
     ${j.status === "done" && !j.clips.length ? `<p class="sub">${esc(j.stage)}</p>` : ""}
     ${j.error ? `<div class="err">${esc(j.error)}<button class="rep" data-act="report" data-ctx="${esc("Video failed: " + (j.title || j.source.name || "") + " | " + j.error)}">Report this</button></div>` : ""}${j.ai?.note ? `<p class="sub">${esc(j.ai.note)}</p>` : ""}
     ${j.clips.length ? `<div class="grid">${j.clips.map(c => clipHtml(j, c)).join("")}</div>` : ""}`;
@@ -2477,6 +2551,15 @@ document.addEventListener("click", async e => {
       if (!typed) return;
       await send("/api/account/delete", {confirm: typed});
       location.href = "/"; return;
+    }
+    if (a === "killjob") {
+      if (!await ask("Kill video processing?", "This will immediately stop processing this video and discard incomplete downloads.", "Kill Process", true)) return;
+      const j = jobOf(d.j);
+      if (j) { j.status = "stopped"; j.stage = "Stopped by you"; }
+      render();
+      toast("Stopping video processing…", "ok");
+      api(`/api/jobs/${d.j}/stop`, {method:"POST"}).catch(e => toast(e.message, "bad")).finally(tick);
+      return;
     }
     if (a === "deljob") {
       if (!await ask("Delete this video?", "The video and all of its clips are permanently deleted. This cannot be undone.", "Delete", true)) return;

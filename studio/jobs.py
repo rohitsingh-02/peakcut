@@ -1,5 +1,6 @@
 """Job pipeline: get video -> audio -> transcript -> AI picks -> rendered clips. One heavy task at a time."""
 import collections
+import contextlib
 import json
 import os
 import math
@@ -293,6 +294,42 @@ def get(jid):
     return job if job and job["user"] == ctx.uid() else None
 
 
+class JobCancelled(Exception):
+    """Raised when a user stops/kills video processing."""
+    pass
+
+
+_cancelled_jobs = set()
+
+
+def is_cancelled(jid: str) -> bool:
+    if not jid:
+        return False
+    return (jid in _cancelled_jobs) or (_jobs.get(jid, {}).get("status") == "stopped")
+
+
+def stop(jid: str) -> bool:
+    with _lock:
+        job = _jobs.get(jid)
+        if not job or job.get("user") != ctx.uid():
+            return False
+        _cancelled_jobs.add(jid)
+        _set(job, status="stopped", stage="Stopped by you", error=None)
+        with _q.cv:
+            for u, dq in list(_q.lines.items()):
+                _q.lines[u] = collections.deque(item for item in dq if item[1] != jid)
+            _q.quick = collections.deque(item for item in _q.quick if item[1] != jid)
+            _q.epoch += 1
+            _q.cv.notify_all()
+        d = Path(job.get("dir", ""))
+        if d.is_dir():
+            for p in d.glob("*.part"):
+                with contextlib.suppress(OSError):
+                    p.unlink(missing_ok=True)
+    ctx.bump(job.get("user"))
+    return True
+
+
 def busy_count() -> int:
     u = ctx.uid()
     return sum(1 for j in list(_by_user.get(u, {}).values()) if j["kind"] == "video" and j["status"] in ("queued", "running"))
@@ -511,6 +548,8 @@ def _wait_for_clips(job, futures, began, workers):
     left, given_up = list(futures), 0
     late = "This clip took too long and was stopped. Open it and press Save and re-make to try again."
     while left:
+        if is_cancelled(job["id"]):
+            raise JobCancelled("Stopped by you")
         still = []
         for f, clip in left:
             if f.done():
@@ -651,6 +690,8 @@ def _run_job(job):
         _set(job, status="running", stage="Picking up where it stopped", error=None)
     else:
         _set(job, status="running", stage="Getting the audio", progress=0.03, error=None, clips=[], ai={}, done_blocks=0)
+    if is_cancelled(job["id"]):
+        raise JobCancelled("Stopped by you")
     speech = o.get("lang") if fetch_model.known(o.get("lang")) else fetch_model.DEFAULT   # the language spoken
     if speech == fetch_model.DEFAULT and not transcribe.model_ready() and not transcribe.REMOTE:
         _set(job, stage="Getting the speech model (one time, about 480 MB)")
@@ -681,9 +722,12 @@ def _run_job(job):
         seen = [-1.0]
 
         def got(p):                       # the bar moves in whole percents: no need to save the file a hundred times a second
+            if is_cancelled(job["id"]):
+                raise JobCancelled("Stopped by you")
             if p - seen[0] >= 0.01 or p >= 1:
                 seen[0] = p
-                _set(job, progress=0.03 + 0.1 * p)
+                pct = int(p * 100)
+                _set(job, progress=0.03 + 0.1 * p, stage=f"Getting the audio ({pct}% downloaded)")
 
         audio_file = media.download_audio(src["url"], d, got)
     else:
@@ -702,6 +746,8 @@ def _run_job(job):
         audio_file.unlink(missing_ok=True)
     if not job["duration"]:
         job["duration"] = len(audio) / 16000
+    if is_cancelled(job["id"]):
+        raise JobCancelled("Stopped by you")
     lo = int((o["range_start"] or 0) * 16000)
     hi = min(len(audio), int(o["range_end"] * 16000)) if o["range_end"] else len(audio)
     span = (hi - lo) / 16000
@@ -733,6 +779,8 @@ def _run_job(job):
     began = {}      # clip id -> when work on it started
 
     def make(clip, words_now):
+        if is_cancelled(job["id"]):
+            return
         began[clip["id"]] = time.time()
         if src["type"] == "url" and (pieces or not whole_video()):
             _fetch_piece(job, clip, audio)
@@ -761,12 +809,15 @@ def _run_job(job):
     yt = None
     if src["type"] == "url" and config.YT_TRANSCRIPT and media.is_youtube(src["url"]):
         try:
+            _set(job, stage="Checking for YouTube transcript...")
             yt = media.youtube_words(src["url"])
         except Exception:  # noqa: BLE001 - no transcript to borrow: ours is written as usual
             yt = None
         if yt and not _covers(yt[0], lo / 16000, hi / 16000):
             yt = None
         job["transcript_from"] = "youtube" if yt else "own"
+    else:
+        job["transcript_from"] = "own"
     # The language spoken decides the captions: YouTube's word for it when its transcript is used, else the choice made.
     job["lang"] = yt[1] if yt else speech
     # A clip found with YouTube's transcript gets its on-screen words from our own model, when there is one here
@@ -812,15 +863,17 @@ def _run_job(job):
     # so it is done here rather than for each clip, and only when asked for.
     statics = quality.static_ranges(job.get("source_path") or "") if config.SKIP_STATIC else []
     for bi, (a, b) in enumerate(blocks):
+        if is_cancelled(job["id"]):
+            raise JobCancelled("Stopped by you")
         if bi < done_blocks:
             continue                      # transcribed and checked by the AI before the restart
         shift = a / 16000
         where = f" (minute {round((a - lo) / 16000 / 60)} of {round(span / 60)})" if len(blocks) > 1 else ""
         if yt:
-            _set(job, stage="Reading the transcript" + where)
+            _set(job, stage="Reading YouTube transcript" + where, transcript_from="youtube")
             bw = [dict(w, s=round(w["s"] - shift, 2), e=round(w["e"] - shift, 2)) for w in yt[0] if a / 16000 <= w["s"] < b / 16000]
         else:
-            _set(job, stage="Writing the transcript" + where)
+            _set(job, stage="Writing transcript with local speech model" + where, transcript_from="own")
             now_on[0] = bi
             hear(bi)
             hear(bi + 1)
@@ -828,7 +881,8 @@ def _run_job(job):
         _set(job, progress=max(job["progress"], 0.14 + 0.78 * (b - lo) / max(1, hi - lo)))
         words += [dict(w, s=round(w["s"] + shift, 2), e=round(w["e"] + shift, 2)) for w in bw]
         (d / "words.json").write_text(json.dumps(words), encoding="utf-8")
-        _set(job, stage="Finding the best moments" + where, word_count=len(words))
+        src_label = "YouTube transcript" if yt else "audio transcript"
+        _set(job, stage=f"Finding best moments ({src_label})" + where, word_count=len(words))
         left = int(o["max_clips"]) - len(job["clips"])
         if left <= 0 or len(bw) < 8:
             job["done_blocks"] = bi + 1
@@ -912,7 +966,7 @@ def _worker(quick_only=False):
                 traceback.print_exc()
             continue
         job = _jobs.get(a)
-        if not job:
+        if not job or (kind == "job" and is_cancelled(a)):
             if kind == "job":
                 _q.done()
             continue
@@ -926,6 +980,10 @@ def _worker(quick_only=False):
                 if clip.get("captions", True):
                     words = json.loads((Path(job["dir"]) / "words.json").read_text(encoding="utf-8"))
                 render_one(job, clip, words)
+        except JobCancelled:
+            if kind == "job":
+                _set(job, status="stopped", stage="Stopped by you", error=None)
+                creators.log(job.get("creator"), f"Video processing stopped by user: {job.get('title')}")
         except Exception as e:  # noqa: BLE001
             (Path(job["dir"]) / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
             if kind == "job":

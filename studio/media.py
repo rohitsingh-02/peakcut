@@ -103,10 +103,14 @@ def cookie_opts() -> dict:
 
 def _ydl(opts):
     import yt_dlp
+    opts = dict(opts)
+    base_args = {"youtube": {"player_client": ["android", "ios", "web"]}}
+    extractor_args = {**base_args, **opts.pop("extractor_args", {})}
     # a channel or playlist link is answered as "a list" straight away, never walked video by video
     return yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, "no_warnings": True, "logger": _Quiet(),
                              "extract_flat": "in_playlist", "playlistend": 1, "socket_timeout": 20,
-                             "concurrent_fragment_downloads": 4, **cookie_opts(), **opts})
+                             "concurrent_fragment_downloads": 4, "extractor_args": extractor_args,
+                             **cookie_opts(), **opts})
 
 
 def _video_format(height):

@@ -1040,6 +1040,18 @@ def clip_write(jid: str, cid: str):
         raise HTTPException(503, str(e))
 
 
+@app.post("/api/jobs/{jid}/stop")
+def stop_job(jid: str):
+    job = _job_or_404(jid)
+    if job.get("kind") == "live" or jid in live.SESSIONS:
+        s = live.mine(jid)
+        if s and not s.ended:
+            s.stop("Stopped by you")
+        return {"ok": True}
+    jobs.stop(jid)
+    return {"ok": True}
+
+
 @app.delete("/api/jobs/{jid}")
 def delete_job(jid: str):
     job = _job_or_404(jid)
