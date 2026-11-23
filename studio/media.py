@@ -136,19 +136,21 @@ def info(url: str) -> dict:
 
 def youtube_words(url: str):
     """YouTube's own transcript of a video, word by word: ([{'w', 's', 'e'}, ...], language), or None if the video
-    has none. Only the transcript in the language that was spoken is used, never a translation."""
+    has none. Checks both uploaded subtitles and auto-generated captions in any available language."""
     if not is_youtube(url):
         return None
     import json
     with _youtube_guard(url), _ydl({}) as ydl:
         i = ydl.extract_info(url, download=False)
-        auto = i.get("automatic_captions") or {}
+        auto = {**(i.get("subtitles") or {}), **(i.get("automatic_captions") or {})}
         lang = str(i.get("language") or "").strip().lower()
         base = lang.split("-")[0] if lang else ""
-        candidates = [f"{lang}-orig", lang, f"{base}-orig", base]
+        candidates = [f"{lang}-orig", lang, f"{base}-orig", base, "en-orig", "en", "en-US", "en-GB", "hi", "hi-orig"]
         key = next((c for c in candidates if c and c in auto), None)
         if not key:
             key = next((k for k in auto if k.endswith("-orig")), None)
+        if not key:
+            key = next((k for k in auto if any(f.get("ext") == "json3" and f.get("url") for f in auto[k])), None)
         track = next((f for f in auto.get(key) or [] if f.get("ext") == "json3" and f.get("url")), None) if key else None
         if not track:
             return None

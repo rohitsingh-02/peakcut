@@ -636,11 +636,9 @@ PROGRESSIVE_FROM = 20 * 60
 
 
 def _covers(words: list, start: float, end: float) -> bool:
-    """Is a borrowed transcript good enough to find clips with? It has to reach the end of the part being clipped
-    and have a normal amount of talking in it; otherwise our own model writes the transcript."""
+    """Is a borrowed transcript good enough to find clips with? Accept it as long as there are words to work with."""
     inside = [w for w in words if start <= w["s"] <= end]
-    minutes = max(0.5, (end - start) / 60)
-    return len(inside) >= 25 * minutes and inside[-1]["s"] >= start + 0.85 * (end - start)
+    return len(inside) >= 15
 
 
 def _facecam(job) -> list | None:
