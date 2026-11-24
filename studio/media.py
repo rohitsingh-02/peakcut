@@ -125,8 +125,64 @@ def _biggest(job_dir: Path, stem: str) -> Path:
     return files[0]
 
 
+def get_video_id(url: str) -> str | None:
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([A-Za-z0-9_-]{11})", url or "")
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", (url or "").strip()):
+        return (url or "").strip()
+    return None
+
+
+def _youtube_oembed_info(url: str) -> dict | None:
+    vid = get_video_id(url)
+    if not vid:
+        return None
+    import json, urllib.request
+    try:
+        req = urllib.request.Request(
+            f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read())
+        title = data.get("title") or ""
+        uploader = data.get("author_name") or ""
+        thumb = data.get("thumbnail_url") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+        dur = 0.0
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            api = YouTubeTranscriptApi()
+            tlist = api.list(vid)
+            t = next(iter(tlist), None)
+            if t:
+                s_data = t.fetch()
+                if s_data:
+                    last = s_data[-1]
+                    dur = round(float(getattr(last, "start", 0) if hasattr(last, "start") else last.get("start", 0)) +
+                                float(getattr(last, "duration", 0) if hasattr(last, "duration") else last.get("duration", 0)), 1)
+        except Exception:
+            pass
+        return {"title": title, "uploader": uploader, "duration": dur, "is_live": False,
+                "thumbnail": thumb, "kind": "video"}
+    except Exception:
+        return None
+
+
 def info(url: str) -> dict:
     """Title, channel and length, without downloading anything."""
+    if is_youtube(url):
+        try:
+            with _youtube_guard(url), _ydl({}) as ydl:
+                i = ydl.extract_info(url, download=False)
+            return {"title": i.get("title") or "", "uploader": i.get("uploader") or i.get("channel") or "",
+                    "duration": float(i.get("duration") or 0), "is_live": bool(i.get("is_live")),
+                    "thumbnail": i.get("thumbnail") or "", "kind": i.get("_type") or "video"}
+        except Exception:
+            oemb = _youtube_oembed_info(url)
+            if oemb and oemb["title"]:
+                return oemb
+            raise
     with _youtube_guard(url), _ydl({}) as ydl:
         i = ydl.extract_info(url, download=False)
     return {"title": i.get("title") or "", "uploader": i.get("uploader") or i.get("channel") or "",
@@ -134,11 +190,87 @@ def info(url: str) -> dict:
             "thumbnail": i.get("thumbnail") or "", "kind": i.get("_type") or "video"}
 
 
+def parse_youtube_timestamp(url: str) -> float | None:
+    """Extract start timestamp in seconds from YouTube URL like &t=1703s or ?t=28m23s."""
+    from urllib.parse import urlparse, parse_qs
+    try:
+        u = urlparse(url or "")
+        params = parse_qs(u.query)
+        t_val = params.get("t", [None])[0] or params.get("start", [None])[0]
+        if not t_val and u.fragment:
+            frag_params = parse_qs(u.fragment)
+            t_val = frag_params.get("t", [None])[0] or frag_params.get("start", [None])[0]
+        if not t_val:
+            return None
+        val = str(t_val).strip().lower()
+        if re.fullmatch(r"\d+s?", val):
+            return float(val.rstrip("s"))
+        h = re.search(r"(\d+)h", val)
+        m_ = re.search(r"(\d+)m", val)
+        s = re.search(r"(\d+)s", val)
+        if h or m_ or s:
+            hours = int(h.group(1)) if h else 0
+            minutes = int(m_.group(1)) if m_ else 0
+            seconds = int(s.group(1)) if s else 0
+            total = hours * 3600 + minutes * 60 + seconds
+            return float(total) if total > 0 else None
+    except Exception:
+        pass
+    return None
+
+
+def _transcript_api_words(url: str, langs: list = None):
+    """Direct transcript fetching via youtube-transcript-api (from yttranscribe.py)."""
+    vid = get_video_id(url)
+    if not vid:
+        return None
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        api = YouTubeTranscriptApi()
+        tlist = api.list(vid)
+        langs = langs or ["hi", "en", "hi-orig", "en-orig", "en-US", "en-GB"]
+        try:
+            t = tlist.find_transcript(langs)
+        except Exception:
+            t = next(iter(tlist), None)
+        if not t:
+            return None
+        data = t.fetch()
+        out = []
+        for item in data:
+            t0 = float(getattr(item, "start", 0) if hasattr(item, "start") else item.get("start", 0))
+            dur = float(getattr(item, "duration", 0) if hasattr(item, "duration") else item.get("duration", 0))
+            txt = getattr(item, "text", "") if hasattr(item, "text") else item.get("text", "")
+            parts = txt.replace("\n", " ").split()
+            for n, w in enumerate(parts):
+                if re.fullmatch(r"[\[(].*[\])]", w) or w in ("[", "]", "__"):
+                    continue
+                at = t0 + dur * n / max(1, len(parts))
+                out.append({"w": w, "s": round(at, 2)})
+        if not out:
+            return None
+        out.sort(key=lambda w: w["s"])
+        for n, w in enumerate(out):
+            nxt = out[n + 1]["s"] if n + 1 < len(out) else w["s"] + 0.4
+            w["e"] = round(max(w["s"] + 0.08, min(nxt, w["s"] + 0.6)), 2)
+        lang = (t.language_code or "en").split("-")[0]
+        return out, lang
+    except Exception:
+        return None
+
+
 def youtube_words(url: str):
     """YouTube's own transcript of a video, word by word: ([{'w', 's', 'e'}, ...], language), or None if the video
-    has none. Checks both uploaded subtitles and auto-generated captions in any available language."""
+    has none. Checks direct YouTubeTranscriptApi first, then yt-dlp uploaded subtitles and auto-generated captions."""
     if not is_youtube(url):
         return None
+
+    # 1. Direct transcript from youtube-transcript-api (fast, reliable)
+    direct = _transcript_api_words(url)
+    if direct:
+        return direct
+
+    # 2. Existing yt-dlp subtitles fallback
     import json
     with _youtube_guard(url), _ydl({}) as ydl:
         i = ydl.extract_info(url, download=False)
@@ -163,6 +295,9 @@ def youtube_english_words(url: str):
     otherwise YouTube's own translation of its transcript. Word list like youtube_words, or None."""
     if not is_youtube(url):
         return None
+    direct = _transcript_api_words(url, langs=["en", "en-US", "en-GB"])
+    if direct:
+        return direct[0]
     import json
     with _youtube_guard(url), _ydl({}) as ydl:
         i = ydl.extract_info(url, download=False)

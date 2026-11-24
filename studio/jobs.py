@@ -358,6 +358,10 @@ def create(source: dict, options: dict, enqueue=True, creator=None, kind="video"
     else:
         d, base, creator = config.user_dir(ctx.uid()) / "jobs" / jid, dict(DEFAULTS), None
     opts = {**base, **clean_options(options)}
+    if source.get("type") == "url" and opts.get("range_start") is None:
+        t_start = media.parse_youtube_timestamp(source.get("url"))
+        if t_start:
+            opts["range_start"] = t_start
     if opts["min_len"] >= opts["max_len"]:
         opts["min_len"] = max(5, opts["max_len"] - 5)
     job = {"id": jid, "user": ctx.uid(), "kind": kind, "creator": creator, "dir": str(d), "created": time.time(), "source": source,
@@ -696,6 +700,15 @@ def _run_job(job):
         fetch_model.ensure()
         _set(job, stage="Getting the audio")
     could_borrow = src["type"] == "url" and config.YT_TRANSCRIPT and media.is_youtube(src["url"])
+    yt_early = None
+    if could_borrow:
+        try:
+            yt_early = media.youtube_words(src["url"])
+            if yt_early:
+                job["transcript_from"] = "youtube"
+                _set(job, stage=f"⚡ Found YouTube transcript ({len(yt_early[0])} words)! Getting audio for clipping...", transcript_from="youtube")
+        except Exception:
+            yt_early = None
     if speech != fetch_model.DEFAULT and not transcribe.REMOTE and not could_borrow and fetch_model.status(speech) == "missing":
         fetch_model.ensure(speech, start=False)      # says what to do, before any time is spent on the download
     fetch = ThreadPoolExecutor(1)
@@ -804,18 +817,16 @@ def _run_job(job):
     blocks = [(x, min(hi, x + step)) for x in range(lo, hi, step)] or [(lo, hi)]
     words, tokens, model = [], 0, None
     done_blocks = 0
-    yt = None
-    if src["type"] == "url" and config.YT_TRANSCRIPT and media.is_youtube(src["url"]):
+    yt = yt_early
+    if yt is None and src["type"] == "url" and config.YT_TRANSCRIPT and media.is_youtube(src["url"]):
         try:
             _set(job, stage="Checking for YouTube transcript...")
             yt = media.youtube_words(src["url"])
         except Exception:  # noqa: BLE001 - no transcript to borrow: ours is written as usual
             yt = None
-        if yt and not _covers(yt[0], lo / 16000, hi / 16000):
-            yt = None
-        job["transcript_from"] = "youtube" if yt else "own"
-    else:
-        job["transcript_from"] = "own"
+    if yt and not _covers(yt[0], lo / 16000, hi / 16000):
+        yt = None
+    job["transcript_from"] = "youtube" if yt else "own"
     # The language spoken decides the captions: YouTube's word for it when its transcript is used, else the choice made.
     job["lang"] = yt[1] if yt else speech
     # A clip found with YouTube's transcript gets its on-screen words from our own model, when there is one here
